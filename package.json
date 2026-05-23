@@ -1,0 +1,35 @@
+{
+  "name": "bilihistory-recorder",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:frontend": "vite build",
+    "build:backend": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/server.js --external:better-sqlite3",
+    "start": "pnpm build:frontend && pnpm build:backend && cross-env STORAGE_BACKEND=sqlite node dist/server.js",
+    "start:json": "pnpm build:frontend && pnpm build:backend && cross-env STORAGE_BACKEND=json node dist/server.js",
+    "start:webdav": "pnpm build:frontend && pnpm build:backend && cross-env STORAGE_BACKEND=webdav node dist/server.js",
+    "deploy": "pnpm build:frontend && wrangler deploy",
+    "dev:all": "wrangler dev"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.3",
+    "better-sqlite3": "^12.10.0",
+    "hono": "^4.12.22",
+    "solid-js": "^1.9.13"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0",
+    "esbuild": "^0.28.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.14",
+    "vite-plugin-solid": "^2.11.12",
+    "wrangler": "^4.94.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild"
+    ]
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "bilihistory-recorder",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "bilihistory-recorder",
+      "database_id": "aaa5b911-ddcf-4732-82b5-5358372be23d"
+    }
+  ]
+}
