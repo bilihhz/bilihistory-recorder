@@ -36,6 +36,7 @@ lerna-debug.log*
 !.dev.vars.example
 !.env.example
 
+chat.md
 *.txt
 *.db
 data/
