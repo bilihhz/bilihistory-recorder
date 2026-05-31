@@ -1,6 +1,6 @@
 import { render } from 'solid-js/web'
 import { createSignal, createResource, createEffect, Show, For, createMemo, onCleanup } from 'solid-js'
-import { deriveKey, generateBlindIndex, encryptData, decryptData, generateRSAKeyPair, exportPublicKeyPem, wrapRSAPrivateKey, unwrapRSAPrivateKey, hybridEncrypt, hybridDecrypt } from './crypto'
+import { deriveKey, generateBlindIndex, encryptData, decryptData, generateRSAKeyPair, exportPublicKeyPem, wrapRSAPrivateKey, unwrapRSAPrivateKey, hybridEncrypt, hybridDecrypt, generateEd25519KeyPair, exportEd25519PublicKeyRaw, wrapEd25519PrivateKey, unwrapEd25519PrivateKey, ed25519HybridEncrypt, ed25519HybridDecrypt, ub64 } from './crypto'
 
 const api = (path: string, opts: any = {}) => fetch(path, {
   ...opts,
@@ -154,30 +154,55 @@ function App() {
           const salt = `${s.name}_bili_vault_entropy`
           const newKey = await deriveKey(s.rawPassword, salt, cfg.encrypt_algo as any)
           let rsaKeys = s.rsaKeys
+          let edKeys = s.edKeys
           if (cfg.encrypt_algo === 'RSA-HYBRID' && cfg.encrypted_private_key && cfg.private_key_iv) {
             try {
               const kek = await deriveKey(s.rawPassword, salt, 'RSA-HYBRID')
               const rsaPriv = await unwrapRSAPrivateKey(cfg.encrypted_private_key, cfg.private_key_iv, kek as CryptoKey)
-              const rsaPub = await window.crypto.subtle.importKey('spki', new Uint8Array(atob(cfg.public_key_pem.replace(/-----.*?-----/g, '')).split('').map(c => c.charCodeAt(0))), { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt', 'wrapKey'])
+              const derB64 = cfg.public_key_pem.replace(/-----.*?-----/g, '').replace(/\s/g, '')
+              const rsaPub = await window.crypto.subtle.importKey('spki', new Uint8Array(atob(derB64).split('').map(c => c.charCodeAt(0))), { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt', 'wrapKey'])
               rsaKeys = { publicKey: rsaPub, privateKey: rsaPriv }
-            } catch {}
+            } catch (e) { console.error('RSA key unwrap (algo block) failed:', e) }
           }
-          setSession({ ...s, cryptoKey: newKey, encryptAlgo: cfg.encrypt_algo, rsaKeys })
+          if (cfg.encrypt_algo === 'ED25519-HYBRID' && cfg.encrypted_private_key && cfg.private_key_iv) {
+            try {
+              const kek = await deriveKey(s.rawPassword, salt, 'ED25519-HYBRID')
+              const edPriv = await unwrapEd25519PrivateKey(cfg.encrypted_private_key, cfg.private_key_iv, kek as CryptoKey)
+              const edPubRaw = ub64(cfg.public_key_pem.replace(/\s/g, ''))
+              const edPub = await window.crypto.subtle.importKey('raw', edPubRaw, { name: 'Ed25519' }, false, ['verify'])
+              edKeys = { publicKey: edPub, privateKey: edPriv }
+            } catch (e) { console.error('Ed25519 key unwrap (algo block) failed:', e) }
+          }
+          setSession({ ...s, cryptoKey: newKey, encryptAlgo: cfg.encrypt_algo, rsaKeys, edKeys })
         }
         setEncryptAlgo(cfg.encrypt_algo)
         localStorage.setItem('encryptAlgo', cfg.encrypt_algo)
       }
-      // Unwrap RSA key if not done above
+      // Unwrap asymmetric keys if not done above
       const curS = session()
-      if (cfg.encrypt_algo === 'RSA-HYBRID' && cfg.encrypted_private_key && cfg.private_key_iv && curS && !curS.rsaKeys) {
-        try {
-          const kek = await deriveKey(curS.rawPassword, `${curS.name}_bili_vault_entropy`, 'RSA-HYBRID')
-          const rsaPriv = await unwrapRSAPrivateKey(cfg.encrypted_private_key, cfg.private_key_iv, kek as CryptoKey)
-          const derB64 = cfg.public_key_pem.replace(/-----.*?-----/g, '').replace(/\s/g, '')
-          const rsaPub = await window.crypto.subtle.importKey('spki', new Uint8Array(atob(derB64).split('').map(c => c.charCodeAt(0))), { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt', 'wrapKey'])
-          setSession({ ...curS, rsaKeys: { publicKey: rsaPub, privateKey: rsaPriv } })
-        } catch {}
+      if (curS && curS.rawPassword) {
+        const salt = `${curS.name}_bili_vault_entropy`
+        if (cfg.encrypt_algo === 'RSA-HYBRID' && cfg.encrypted_private_key && cfg.private_key_iv && !curS.rsaKeys) {
+          try {
+            const kek = await deriveKey(curS.rawPassword, salt, 'RSA-HYBRID')
+            const rsaPriv = await unwrapRSAPrivateKey(cfg.encrypted_private_key, cfg.private_key_iv, kek as CryptoKey)
+            const derB64 = cfg.public_key_pem.replace(/-----.*?-----/g, '').replace(/\s/g, '')
+            const rsaPub = await window.crypto.subtle.importKey('spki', new Uint8Array(atob(derB64).split('').map(c => c.charCodeAt(0))), { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt', 'wrapKey'])
+            setSession({ ...curS, rsaKeys: { publicKey: rsaPub, privateKey: rsaPriv } })
+          } catch (e) { console.error('RSA key unwrap (fallback) failed:', e) }
+        }
+        if (cfg.encrypt_algo === 'ED25519-HYBRID' && cfg.encrypted_private_key && cfg.private_key_iv && !curS.edKeys) {
+          try {
+            const kek = await deriveKey(curS.rawPassword, salt, 'ED25519-HYBRID')
+            const edPriv = await unwrapEd25519PrivateKey(cfg.encrypted_private_key, cfg.private_key_iv, kek as CryptoKey)
+            const edPubRaw = ub64(cfg.public_key_pem.replace(/\s/g, ''))
+            const edPub = await window.crypto.subtle.importKey('raw', edPubRaw, { name: 'Ed25519' }, false, ['verify'])
+            setSession({ ...curS, edKeys: { publicKey: edPub, privateKey: edPriv } })
+          } catch (e) { console.error('Ed25519 key unwrap (fallback) failed:', e) }
+        }
       }
+      // Force refetch history so decrypt uses the correct keys
+      refetch()
     }
   }
 
@@ -190,9 +215,11 @@ function App() {
     }
     let publicKeyPem = null, encryptedPrivateKey = null, privateKeyIv = null
     let rsaKeys = s.rsaKeys
-    const isRSA = encryptAlgo() === 'RSA-HYBRID'
-    const algoChanged = s.encryptAlgo !== encryptAlgo()
-    if (isRSA && (algoChanged || !rsaKeys)) {
+    let edKeys = s.edKeys
+    const algo = encryptAlgo()
+    const isAsymmetric = algo === 'RSA-HYBRID' || algo === 'ED25519-HYBRID'
+    const algoChanged = s.encryptAlgo !== algo
+    if (algo === 'RSA-HYBRID' && (algoChanged || !rsaKeys)) {
       const rsa = await generateRSAKeyPair()
       publicKeyPem = await exportPublicKeyPem(rsa.publicKey)
       const kek = await deriveKey(s.rawPassword, `${s.name}_bili_vault_entropy`, 'RSA-HYBRID')
@@ -200,6 +227,15 @@ function App() {
       encryptedPrivateKey = wrapped.wrappedKey
       privateKeyIv = wrapped.iv
       rsaKeys = rsa
+    }
+    if (algo === 'ED25519-HYBRID' && (algoChanged || !edKeys)) {
+      const ed = await generateEd25519KeyPair()
+      publicKeyPem = await exportEd25519PublicKeyRaw(ed.publicKey)
+      const kek = await deriveKey(s.rawPassword, `${s.name}_bili_vault_entropy`, 'ED25519-HYBRID')
+      const wrapped = await wrapEd25519PrivateKey(ed.privateKey, kek as CryptoKey)
+      encryptedPrivateKey = wrapped.wrappedKey
+      privateKeyIv = wrapped.iv
+      edKeys = ed
     }
     await api('/api/user/config', {
       method: 'POST',
@@ -212,7 +248,7 @@ function App() {
         fullEncrypt: fullEncrypt() ? 1 : 0,
         fetchLimit: fetchLimit(),
         autoFetchInterval: autoFetchInterval(),
-        encryptAlgo: encryptAlgo(),
+        encryptAlgo: algo,
         publicKeyPem,
         encryptedPrivateKey,
         privateKeyIv,
@@ -220,11 +256,11 @@ function App() {
     })
     if (algoChanged && s.rawPassword) {
       const salt = `${s.name}_bili_vault_entropy`
-      const newKey = await deriveKey(s.rawPassword, salt, encryptAlgo() as any)
-      setSession({ ...s, cryptoKey: newKey, encryptAlgo: encryptAlgo(), rsaKeys })
-      localStorage.setItem('encryptAlgo', encryptAlgo())
+      const newKey = await deriveKey(s.rawPassword, salt, algo as any)
+      setSession({ ...s, cryptoKey: newKey, encryptAlgo: algo, rsaKeys, edKeys })
+      localStorage.setItem('encryptAlgo', algo)
     }
-    addLog(`配置已保存 (算法:${encryptAlgo()} RSA:${isRSA?'密钥已生成':'无'} Cookie加密:${encryptCookie()?'开':'关'})`)
+    addLog(`配置已保存 (算法:${algo} 非对称:${isAsymmetric?'密钥已生成':'无'} Cookie加密:${encryptCookie()?'开':'关'})`)
   }
 
   const runFetch = async () => {
@@ -253,10 +289,11 @@ function App() {
             const payload = JSON.stringify({ bvid: item.bvid, title: item.title, pic: item.pic, author: item.author_name, authorMid: item.author_mid, progress: item.progress, duration: item.duration, uri: item.uri, viewAt: item.view_at * 1000 })
             if (!encOn) return noBase64() ? payload : btoa(unescape(encodeURIComponent(payload)))
             if (encryptAlgo() === 'RSA-HYBRID' && rsaKeys) return await hybridEncrypt(payload, rsaKeys.publicKey)
+            if (encryptAlgo() === 'ED25519-HYBRID' && session().edKeys) return await ed25519HybridEncrypt(payload, session().edKeys.publicKey, session().edKeys.privateKey)
             return await encryptData(payload, key)
           })(),
         ])
-        return { blindIndex, encryptedPayload, bvidRaw: fullOn ? '' : item.bvid, titleRaw: fullOn ? '' : item.title, authorNameRaw: fullOn ? '' : item.author_name, authorMidRaw: fullOn ? 0 : item.author_mid, viewAt: item.view_at }
+        return { blindIndex, encryptedPayload, bvidRaw: fullOn ? '' : item.bvid, titleRaw: fullOn ? '' : item.title, authorNameRaw: fullOn ? '' : item.author_name, authorMidRaw: fullOn ? 0 : item.author_mid, picRaw: item.pic || '', viewAt: item.view_at }
       }))
 
       await api('/api/history/sync-batch', { method: 'POST', body: JSON.stringify({ items }) })
@@ -278,8 +315,10 @@ function App() {
       const res = await api(`/api/history/list?${params}`)
       const data = await res.json()
       const rows = data.success ? data.records : []
-      const key = session()!.cryptoKey
-      const rsaKeys = session()!.rsaKeys
+      const sess = session()!
+      const key = sess.cryptoKey
+      const rsaKeys = sess.rsaKeys
+      const edKeys = sess.edKeys
       const decoded = await Promise.all(rows.map(async (r: any) => {
         let d: any = null
         try {
@@ -287,6 +326,8 @@ function App() {
           let raw: string
           if (encOn && ep.startsWith('rsa:') && rsaKeys) {
             raw = await hybridDecrypt(ep, rsaKeys.privateKey)
+          } else if (encOn && ep.startsWith('ed25519:') && edKeys) {
+            raw = await ed25519HybridDecrypt(ep, edKeys.privateKey)
           } else if (encOn) {
             raw = await decryptData(ep, key)
           } else if (noB64) {
@@ -295,7 +336,7 @@ function App() {
             raw = decodeURIComponent(escape(atob(ep)))
           }
           d = JSON.parse(raw)
-        } catch {}
+        } catch (e) { console.error('Decrypt error for record', r.blind_index?.slice(0, 12), e) }
         return { ...r, _d: d }
       }))
       return { records: decoded, total: data.total || 0 }
@@ -410,7 +451,7 @@ function App() {
               <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
               <For each={processedList()}>{r => {
                 const d = r._d
-                const pic = d?.pic || ''
+                const pic = d?.pic || r.pic_raw || ''
                 return (
                   <a href={biliLink(d?.bvid || r.bvid_raw || '')} target="_blank" rel="noopener noreferrer" class="bg-gray-900 rounded-lg border border-gray-800 p-3 flex gap-3 hover:border-blue-500 hover:shadow-lg hover:shadow-blue-900/20 transition-all duration-200 block no-underline text-inherit">
                     <img src={pic ? `/api/proxy/image?url=${encodeURIComponent(pic.replace(/^http:\/\//, 'https://').replace(/^\/\//, 'https://'))}` : ''} alt="封面" loading="lazy" class="w-24 sm:w-32 h-16 sm:h-20 object-cover rounded bg-gray-800 flex-shrink-0" onerror={(e: any) => { e.target.onerror = null; e.target.src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="128" height="80" fill="%23222"><rect width="128" height="80"/><text x="64" y="44" text-anchor="middle" fill="%23555" font-size="12">无封面</text></svg>' }} />
@@ -427,7 +468,11 @@ function App() {
             </div>
               <div class="flex justify-center items-center gap-3 pt-2">
                 <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page() === 1} class="text-xs bg-gray-800 hover:bg-gray-700 px-3 py-1.5 rounded disabled:opacity-30 transition">上一页</button>
-                <span class="text-xs text-gray-400">第 {page()} / {totalPages()} 页 · 共 {totalItems()} 条</span>
+                <div class="flex items-center gap-1 text-xs text-gray-400">
+                  <span>第</span>
+                  <input type="number" min="1" max={totalPages()} value={page()} onInput={e => { const v = parseInt(e.currentTarget.value); if (v >= 1 && v <= totalPages()) setPage(v) }} class="w-12 text-center p-1 bg-gray-800 border border-gray-700 rounded text-white font-mono text-xs" />
+                  <span>/ {totalPages()} 页 · 共 {totalItems()} 条</span>
+                </div>
                 <button onClick={() => setPage(p => Math.min(totalPages(), p + 1))} disabled={page() >= totalPages()} class="text-xs bg-gray-800 hover:bg-gray-700 px-3 py-1.5 rounded disabled:opacity-30 transition">下一页</button>
               </div>
             </div>
@@ -501,11 +546,12 @@ function App() {
                       <option value="AES-GCM-256">AES-GCM-256</option>
                       <option value="AES-CBC-256">AES-CBC-256</option>
                       <option value="RSA-HYBRID">RSA-HYBRID (混合)</option>
+                      <option value="ED25519-HYBRID">ED25519-HYBRID (签名)</option>
                     </select>
                   </div>
                 </div>
                 <div class="text-[11px] leading-relaxed space-y-1">
-                  <div class="flex items-center gap-1.5"><div class={`w-2 h-2 rounded-full ${encryptEnabled() ? 'bg-green-500' : 'bg-gray-500'}`}></div><span class="text-gray-400">载荷: {encryptEnabled() ? (encryptAlgo() === 'RSA-HYBRID' ? 'RSA-2048 + AES-256-GCM' : encryptAlgo()) : noBase64() ? '纯文本' : 'Base64'}</span></div>
+                  <div class="flex items-center gap-1.5"><div class={`w-2 h-2 rounded-full ${encryptEnabled() ? 'bg-green-500' : 'bg-gray-500'}`}></div><span class="text-gray-400">载荷: {encryptEnabled() ? (encryptAlgo() === 'RSA-HYBRID' ? 'RSA-2048 + AES-256-GCM' : encryptAlgo() === 'ED25519-HYBRID' ? 'Ed25519 + AES-256-GCM' : encryptAlgo()) : noBase64() ? '纯文本' : 'Base64'}</span></div>
                   <div class="flex items-center gap-1.5"><div class={`w-2 h-2 rounded-full ${fullEncrypt() ? 'bg-red-500' : 'bg-green-500'}`}></div><span class="text-gray-400">搜索字段: {fullEncrypt() ? '已隐藏 (本地搜索)' : '明文 (服务端搜索)'}</span></div>
                   <div class="flex items-center gap-1.5"><div class={`w-2 h-2 rounded-full ${encryptCookie() ? 'bg-blue-500' : 'bg-gray-500'}`}></div><span class="text-gray-400">Cookie: {encryptCookie() ? `${encryptAlgo()} 加密存储` : '明文存储'}</span></div>
                   <div class="flex items-center gap-1.5"><div class="w-2 h-2 rounded-full bg-blue-500"></div><span class="text-gray-400">盲索引: HMAC-SHA256 (始终启用)</span></div>

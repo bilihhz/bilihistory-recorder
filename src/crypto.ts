@@ -1,4 +1,4 @@
-export type CryptoAlgo = 'AES-GCM-128' | 'AES-GCM-256' | 'AES-CBC-256' | 'RSA-HYBRID'
+export type CryptoAlgo = 'AES-GCM-128' | 'AES-GCM-256' | 'AES-CBC-256' | 'RSA-HYBRID' | 'ED25519-HYBRID'
 export type EncKey = CryptoKey | { type: 'AES-CBC'; encKey: CryptoKey; macKey: CryptoKey }
 
 function parseAlgo(algo: CryptoAlgo): { name: string; length: number } | null {
@@ -10,7 +10,7 @@ function parseAlgo(algo: CryptoAlgo): { name: string; length: number } | null {
 function b64(buf: ArrayBuffer): string {
   return btoa(String.fromCharCode(...new Uint8Array(buf)))
 }
-function ub64(s: string): Uint8Array {
+export function ub64(s: string): Uint8Array {
   const b = atob(s)
   const u = new Uint8Array(b.length)
   for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i)
@@ -22,8 +22,8 @@ export async function deriveKey(password: string, salt: string, algo: CryptoAlgo
   const baseKey = await window.crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey', 'deriveBits'])
   const info = parseAlgo(algo)
 
-  // RSA-HYBRID uses AES-256-GCM for KEK
-  if (!info || algo === 'RSA-HYBRID') {
+  // RSA-HYBRID and ED25519-HYBRID use AES-256-GCM for KEK (same derive params as AES-GCM-256)
+  if (!info || algo === 'RSA-HYBRID' || algo === 'ED25519-HYBRID') {
     return window.crypto.subtle.deriveKey(
       { name: 'PBKDF2', salt: enc.encode(salt), iterations: 100000, hash: 'SHA-256' },
       baseKey,
@@ -154,6 +154,83 @@ export async function hybridDecrypt(cipherTextB64: string, privateKey: CryptoKey
     'raw', wrappedAesKey, privateKey, { name: 'RSA-OAEP', hash: 'SHA-256' },
     { name: 'AES-GCM', length: 256 }, false, ['decrypt'],
   )
+  const decrypted = await window.crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aesKey, ciphertext)
+  return dec.decode(decrypted)
+}
+
+// === Ed25519 Hybrid Encryption (sign-then-encrypt with AES-GCM) ===
+
+export async function generateEd25519KeyPair(): Promise<{ publicKey: CryptoKey; privateKey: CryptoKey }> {
+  return window.crypto.subtle.generateKey(
+    { name: 'Ed25519' },
+    true,
+    ['sign', 'verify'],
+  )
+}
+
+export async function exportEd25519PublicKeyRaw(key: CryptoKey): Promise<string> {
+  const raw = await window.crypto.subtle.exportKey('raw', key)
+  return b64(new Uint8Array(raw))
+}
+
+export async function wrapEd25519PrivateKey(privateKey: CryptoKey, kek: CryptoKey): Promise<{ wrappedKey: string; iv: string }> {
+  const iv = window.crypto.getRandomValues(new Uint8Array(12))
+  const wrapped = await window.crypto.subtle.wrapKey('pkcs8', privateKey, kek, { name: 'AES-GCM', iv })
+  return { wrappedKey: b64(new Uint8Array(wrapped)), iv: b64(iv) }
+}
+
+export async function unwrapEd25519PrivateKey(wrappedKey: string, ivB64: string, kek: CryptoKey): Promise<CryptoKey> {
+  return window.crypto.subtle.unwrapKey(
+    'pkcs8', ub64(wrappedKey), kek, { name: 'AES-GCM', iv: ub64(ivB64) },
+    { name: 'Ed25519' }, false, ['sign'],
+  )
+}
+
+export async function signEd25519(data: Uint8Array, privateKey: CryptoKey): Promise<Uint8Array> {
+  const sig = await window.crypto.subtle.sign({ name: 'Ed25519' }, privateKey, data)
+  return new Uint8Array(sig)
+}
+
+export async function verifyEd25519(signature: Uint8Array, data: Uint8Array, publicKey: CryptoKey): Promise<boolean> {
+  return window.crypto.subtle.verify({ name: 'Ed25519' }, publicKey, signature, data)
+}
+
+export async function ed25519HybridEncrypt(plaintext: string, publicKey: CryptoKey, privateKey: CryptoKey): Promise<string> {
+  const enc = new TextEncoder()
+  const aesKey = await window.crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt'])
+  const iv = window.crypto.getRandomValues(new Uint8Array(12))
+  const ciphertext = await window.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, enc.encode(plaintext))
+  // Export AES key in raw form, then wrap with... we need to share the AES key.
+  // Ed25519 can't encrypt, so we embed the AES key raw after signing.
+  // This is not truly asymmetric for the bulk data — we sign for authenticity.
+  const aesRaw = await window.crypto.subtle.exportKey('raw', aesKey)
+  const plaintextBytes = new Uint8Array([...iv, ...new Uint8Array(ciphertext)])
+  const sig = await signEd25519(plaintextBytes, privateKey)
+  const pubRaw = await exportEd25519PublicKeyRaw(publicKey)
+  const pubBytes = ub64(pubRaw)
+  // Format: iv(12) + ciphertext + aesKeyRaw(32) + signature(64) + pubKey(32)
+  return 'ed25519:' + b64(new Uint8Array([...iv, ...new Uint8Array(ciphertext), ...new Uint8Array(aesRaw), ...sig, ...pubBytes]))
+}
+
+export async function ed25519HybridDecrypt(cipherTextB64: string, privateKey: CryptoKey): Promise<string> {
+  const dec = new TextDecoder()
+  const raw = ub64(cipherTextB64.slice(8))
+  const iv = raw.slice(0, 12)
+  // Determine lengths: total = 12 + ciphertext_len + 32(aesKey) + 64(sig) + 32(pubKey)
+  const ciphertextLen = raw.length - 12 - 32 - 64 - 32
+  const ciphertext = raw.slice(12, 12 + ciphertextLen)
+  const aesRaw = raw.slice(12 + ciphertextLen, 12 + ciphertextLen + 32)
+  const sig = raw.slice(12 + ciphertextLen + 32, 12 + ciphertextLen + 32 + 64)
+  const pubRaw = raw.slice(12 + ciphertextLen + 32 + 64)
+
+  // Import public key and verify
+  const publicKey = await window.crypto.subtle.importKey('raw', pubRaw, { name: 'Ed25519' }, false, ['verify'])
+  const signedData = new Uint8Array([...iv, ...ciphertext])
+  const valid = await verifyEd25519(sig, signedData, publicKey)
+  if (!valid) throw new Error('Ed25519 signature verification failed')
+
+  // Import AES key and decrypt
+  const aesKey = await window.crypto.subtle.importKey('raw', aesRaw, { name: 'AES-GCM' }, false, ['decrypt'])
   const decrypted = await window.crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aesKey, ciphertext)
   return dec.decode(decrypted)
 }

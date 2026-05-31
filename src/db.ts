@@ -11,6 +11,7 @@ export interface SyncRecord {
   titleRaw?: string
   authorNameRaw?: string
   authorMidRaw?: number
+  picRaw?: string
 }
 
 export interface ListParams {
@@ -49,7 +50,7 @@ class D1Adapter implements StorageAdapter {
     await this.env.DB.batch([
       this.env.DB.prepare('CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT)'),
       this.env.DB.prepare('CREATE TABLE IF NOT EXISTS user_configs (user_id TEXT PRIMARY KEY, bili_cookie TEXT, encrypt_cookie INTEGER DEFAULT 0, is_auto_sync INTEGER DEFAULT 0, encrypt_enabled INTEGER DEFAULT 1, full_encrypt INTEGER DEFAULT 0, no_base64 INTEGER DEFAULT 0, fetch_limit INTEGER DEFAULT 30, fetch_max_pages INTEGER DEFAULT 5, auto_fetch_interval INTEGER DEFAULT 0, encrypt_algo TEXT DEFAULT \'AES-GCM-256\', public_key_pem TEXT, encrypted_private_key TEXT, private_key_iv TEXT, FOREIGN KEY (user_id) REFERENCES users(id))'),
-      this.env.DB.prepare('CREATE TABLE IF NOT EXISTS watch_history (user_id TEXT NOT NULL, blind_index TEXT NOT NULL, encrypted_payload TEXT NOT NULL, view_at INTEGER NOT NULL, bvid_raw TEXT, title_raw TEXT, author_name_raw TEXT, author_mid_raw INTEGER DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY (user_id, blind_index))'),
+      this.env.DB.prepare('CREATE TABLE IF NOT EXISTS watch_history (user_id TEXT NOT NULL, blind_index TEXT NOT NULL, encrypted_payload TEXT NOT NULL, view_at INTEGER NOT NULL, bvid_raw TEXT, title_raw TEXT, author_name_raw TEXT, author_mid_raw INTEGER DEFAULT 0, pic_raw TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY (user_id, blind_index))'),
     ])
     // migrate missing columns on existing tables (D1 ALTER TABLE has no IF NOT EXISTS)
     const migCols: [string, string][] = [
@@ -69,6 +70,8 @@ class D1Adapter implements StorageAdapter {
     for (const [col, def] of migCols) {
       try { await this.env.DB.prepare(`ALTER TABLE user_configs ADD COLUMN ${col} ${def}`).run() } catch {}
     }
+    // migrate watch_history columns
+    try { await this.env.DB.prepare(`ALTER TABLE watch_history ADD COLUMN pic_raw TEXT`).run() } catch {}
     this.initialized = true
   }
 
@@ -127,17 +130,17 @@ class D1Adapter implements StorageAdapter {
     await this.ensureTables()
     const now = Date.now()
     await this.env.DB.prepare(
-      `INSERT INTO watch_history (user_id, blind_index, encrypted_payload, view_at, bvid_raw, title_raw, author_name_raw, author_mid_raw, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO watch_history (user_id, blind_index, encrypted_payload, view_at, bvid_raw, title_raw, author_name_raw, author_mid_raw, pic_raw, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id, blind_index) DO UPDATE SET
-         encrypted_payload=excluded.encrypted_payload,
          view_at=excluded.view_at,
          bvid_raw=excluded.bvid_raw,
          title_raw=excluded.title_raw,
          author_name_raw=excluded.author_name_raw,
          author_mid_raw=excluded.author_mid_raw,
+         pic_raw=excluded.pic_raw,
          updated_at=excluded.updated_at`,
-    ).bind(record.userId, record.blindIndex, record.encryptedPayload, record.viewAt || Math.floor(Date.now() / 1000), record.bvidRaw || '', record.titleRaw || '', record.authorNameRaw || '', record.authorMidRaw || 0, now).run()
+    ).bind(record.userId, record.blindIndex, record.encryptedPayload, record.viewAt || Math.floor(Date.now() / 1000), record.bvidRaw || '', record.titleRaw || '', record.authorNameRaw || '', record.authorMidRaw || 0, record.picRaw || null, now).run()
   }
 
   async listHistory(params: ListParams) {
@@ -182,13 +185,14 @@ async function getSqliteDb() {
     _sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT);
     CREATE TABLE IF NOT EXISTS user_configs (user_id TEXT PRIMARY KEY, bili_cookie TEXT, encrypt_cookie INTEGER DEFAULT 0, is_auto_sync INTEGER DEFAULT 0, encrypt_enabled INTEGER DEFAULT 1, full_encrypt INTEGER DEFAULT 0, no_base64 INTEGER DEFAULT 0, fetch_limit INTEGER DEFAULT 30, fetch_max_pages INTEGER DEFAULT 5, auto_fetch_interval INTEGER DEFAULT 0, encrypt_algo TEXT DEFAULT 'AES-GCM-256', public_key_pem TEXT, encrypted_private_key TEXT, private_key_iv TEXT, FOREIGN KEY (user_id) REFERENCES users(id));
-    CREATE TABLE IF NOT EXISTS watch_history (user_id TEXT NOT NULL, blind_index TEXT NOT NULL, encrypted_payload TEXT NOT NULL, view_at INTEGER NOT NULL, bvid_raw TEXT, title_raw TEXT, author_name_raw TEXT, author_mid_raw INTEGER DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY (user_id, blind_index));
+    CREATE TABLE IF NOT EXISTS watch_history (user_id TEXT NOT NULL, blind_index TEXT NOT NULL, encrypted_payload TEXT NOT NULL, view_at INTEGER NOT NULL, bvid_raw TEXT, title_raw TEXT, author_name_raw TEXT, author_mid_raw INTEGER DEFAULT 0, pic_raw TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY (user_id, blind_index));
   `)
   // migrate missing columns
   try { _sqliteDb.exec(`ALTER TABLE user_configs ADD COLUMN no_base64 INTEGER DEFAULT 0`) } catch {}
   try { _sqliteDb.exec(`ALTER TABLE user_configs ADD COLUMN encrypt_algo TEXT DEFAULT 'AES-GCM-256'`) } catch {}
   try { _sqliteDb.exec(`ALTER TABLE user_configs ADD COLUMN encrypted_private_key TEXT`) } catch {}
   try { _sqliteDb.exec(`ALTER TABLE user_configs ADD COLUMN private_key_iv TEXT`) } catch {}
+  try { _sqliteDb.exec(`ALTER TABLE watch_history ADD COLUMN pic_raw TEXT`) } catch {}
   return _sqliteDb
 }
 
@@ -242,17 +246,17 @@ class SqliteAdapter implements StorageAdapter {
   async syncHistory(record: SyncRecord) {
     const now = Date.now()
     ;(await this.db()).prepare(
-      `INSERT INTO watch_history (user_id, blind_index, encrypted_payload, view_at, bvid_raw, title_raw, author_name_raw, author_mid_raw, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO watch_history (user_id, blind_index, encrypted_payload, view_at, bvid_raw, title_raw, author_name_raw, author_mid_raw, pic_raw, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id, blind_index) DO UPDATE SET
-         encrypted_payload=excluded.encrypted_payload,
          view_at=excluded.view_at,
          bvid_raw=excluded.bvid_raw,
          title_raw=excluded.title_raw,
          author_name_raw=excluded.author_name_raw,
          author_mid_raw=excluded.author_mid_raw,
+         pic_raw=excluded.pic_raw,
          updated_at=excluded.updated_at`,
-    ).run(record.userId, record.blindIndex, record.encryptedPayload, record.viewAt || Math.floor(Date.now() / 1000), record.bvidRaw || '', record.titleRaw || '', record.authorNameRaw || '', record.authorMidRaw || 0, now)
+    ).run(record.userId, record.blindIndex, record.encryptedPayload, record.viewAt || Math.floor(Date.now() / 1000), record.bvidRaw || '', record.titleRaw || '', record.authorNameRaw || '', record.authorMidRaw || 0, record.picRaw || null, now)
   }
 
   async listHistory(params: ListParams) {
@@ -345,8 +349,8 @@ class JsonFileAdapter implements StorageAdapter {
     const records = await this.readJson<any[]>(this.historyPath(record.userId), [])
     const now = Date.now()
     const idx = records.findIndex(r => r.blind_index === record.blindIndex)
-    const entry = { blind_index: record.blindIndex, encrypted_payload: record.encryptedPayload, view_at: record.viewAt || Math.floor(Date.now() / 1000), bvid_raw: record.bvidRaw || '', title_raw: record.titleRaw || '', author_name_raw: record.authorNameRaw || '', author_mid_raw: record.authorMidRaw || 0, updated_at: now }
-    if (idx >= 0) records[idx] = { ...records[idx], ...entry }
+    const entry = { blind_index: record.blindIndex, encrypted_payload: record.encryptedPayload, view_at: record.viewAt || Math.floor(Date.now() / 1000), bvid_raw: record.bvidRaw || '', title_raw: record.titleRaw || '', author_name_raw: record.authorNameRaw || '', author_mid_raw: record.authorMidRaw || 0, pic_raw: record.picRaw || null, updated_at: now }
+    if (idx >= 0) records[idx] = { ...records[idx], ...entry, encrypted_payload: records[idx].encrypted_payload }
     else records.push(entry)
     await this.writeJson(this.historyPath(record.userId), records)
   }
@@ -449,8 +453,8 @@ class WebDAVAdapter implements StorageAdapter {
     const records = await this.readJson<any[]>(path, [])
     const now = Date.now()
     const idx = records.findIndex(r => r.blind_index === record.blindIndex)
-    const entry = { blind_index: record.blindIndex, encrypted_payload: record.encryptedPayload, view_at: record.viewAt || Math.floor(Date.now() / 1000), bvid_raw: record.bvidRaw || '', title_raw: record.titleRaw || '', author_name_raw: record.authorNameRaw || '', author_mid_raw: record.authorMidRaw || 0, updated_at: now }
-    if (idx >= 0) records[idx] = { ...records[idx], ...entry }
+    const entry = { blind_index: record.blindIndex, encrypted_payload: record.encryptedPayload, view_at: record.viewAt || Math.floor(Date.now() / 1000), bvid_raw: record.bvidRaw || '', title_raw: record.titleRaw || '', author_name_raw: record.authorNameRaw || '', author_mid_raw: record.authorMidRaw || 0, pic_raw: record.picRaw || null, updated_at: now }
+    if (idx >= 0) records[idx] = { ...records[idx], ...entry, encrypted_payload: records[idx].encrypted_payload }
     else records.push(entry)
     await this.writeJson(path, records)
   }
